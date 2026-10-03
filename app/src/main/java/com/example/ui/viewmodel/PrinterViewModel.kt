@@ -2,6 +2,7 @@ package com.example.ui.viewmodel
 
 import android.app.Application
 import android.net.Uri
+import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.model.ColorMode
@@ -94,37 +95,26 @@ class PrinterViewModel(application: Application) : AndroidViewModel(application)
     private fun initInitialPcConnection() {
         val defaultPrinters = listOf(
             PrinterInfo(
-                id = "hp_laserjet_pro",
-                name = "HP LaserJet Pro M404dw (PC USB)",
+                id = "hp_m1212nf",
+                name = "HP LaserJet Professional M1212nf MFP",
                 isDefault = true,
                 status = PrinterStatus.READY,
                 isColorSupported = false,
                 isDuplexSupported = true,
+                driver = "HP LaserJet M1210 MFP Series PCLm",
+                portName = "USB001 / DOT4",
+                inkLevelPercent = 95
+            ),
+            PrinterInfo(
+                id = "hp_laserjet_generic",
+                name = "HP LaserJet Serisi (PCL-6)",
+                isDefault = false,
+                status = PrinterStatus.READY,
+                isColorSupported = false,
+                isDuplexSupported = true,
                 driver = "HP PCL-6 Windows Driver",
-                portName = "USB001",
-                inkLevelPercent = 88
-            ),
-            PrinterInfo(
-                id = "epson_ecotank_l3250",
-                name = "Epson EcoTank L3250 Renkli (WiFi/PC)",
-                isDefault = false,
-                status = PrinterStatus.READY,
-                isColorSupported = true,
-                isDuplexSupported = false,
-                driver = "Epson ESC/P-R Driver",
                 portName = "WSD-Port",
-                inkLevelPercent = 65
-            ),
-            PrinterInfo(
-                id = "canon_pixma_g3010",
-                name = "Canon PIXMA G3010 Fotoğraf Yazıcısı",
-                isDefault = false,
-                status = PrinterStatus.READY,
-                isColorSupported = true,
-                isDuplexSupported = false,
-                driver = "Canon IJ Driver",
-                portName = "USB002",
-                inkLevelPercent = 92
+                inkLevelPercent = 88
             ),
             PrinterInfo(
                 id = "microsoft_print_to_pdf",
@@ -144,12 +134,13 @@ class PrinterViewModel(application: Application) : AndroidViewModel(application)
                 pcServer = current.pcServer.copy(
                     printers = defaultPrinters,
                     isConnected = true,
-                    isSimulated = true,
-                    pingMs = 12
+                    isSimulated = false,
+                    pingMs = 5
                 ),
                 printSettings = current.printSettings.copy(
                     printerId = defaultPrinters.first().id,
-                    printerName = defaultPrinters.first().name
+                    printerName = defaultPrinters.first().name,
+                    colorMode = ColorMode.MONOCHROME
                 )
             )
         }
@@ -444,6 +435,14 @@ class PrinterViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private fun readBytesFromUri(uri: Uri): ByteArray? {
+        return try {
+            getApplication<Application>().contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private suspend fun executeJobFlow(
         initialJob: PrintJob,
         item: PrintItem,
@@ -453,74 +452,83 @@ class PrinterViewModel(application: Application) : AndroidViewModel(application)
         var currentJob = initialJob
 
         // Step 1: Connecting
-        delay(600)
         currentJob = currentJob.copy(
             status = JobStatus.CONNECTING,
-            progressPercent = 20,
-            statusMessage = "${pc.ipAddress}:${pc.port} ile WiFi el sıkışması yapılıyor..."
+            progressPercent = 15,
+            statusMessage = "${pc.ipAddress}:${pc.port} üzerinden HP LaserJet bağlantısı kuruluyor..."
         )
         updateJobState(currentJob)
 
-        // Step 2: Uploading / Sending
-        delay(800)
-        for (p in 25..75 step 15) {
-            delay(350)
+        // Read real file payload from Android content resolver
+        val (base64Payload, textPayload) = when (item) {
+            is PrintItem.DocumentItem -> {
+                val bytes = readBytesFromUri(item.uri)
+                val b64 = bytes?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
+                Pair(b64, null)
+            }
+            is PrintItem.PhotoItem -> {
+                val bytes = readBytesFromUri(item.uri)
+                val b64 = bytes?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
+                Pair(b64, null)
+            }
+            is PrintItem.TextNoteItem -> Pair(null, item.content)
+            is PrintItem.ClipboardItem -> Pair(null, item.text)
+            is PrintItem.WebPageItem -> Pair(null, "URL: ${item.url}")
+        }
+
+        // Step 2: Uploading real payload to PC
+        currentJob = currentJob.copy(
+            status = JobStatus.SENDING,
+            progressPercent = 40,
+            statusMessage = "Dosya verisi (${item.title}) PC sunucusuna aktarılıyor..."
+        )
+        updateJobState(currentJob)
+
+        // Real Network transmission to PC Companion server
+        val sendResult = pcClient.sendPrintJob(
+            pc.ipAddress,
+            pc.port,
+            currentJob,
+            settings,
+            base64Payload,
+            textPayload
+        )
+
+        if (sendResult.isSuccess) {
+            // Step 3: Physical Spooling on PC
             currentJob = currentJob.copy(
-                status = JobStatus.SENDING,
-                progressPercent = p,
-                statusMessage = "Baskı verisi PC'ye aktarılıyor (%$p)..."
+                status = JobStatus.SPOOLING,
+                progressPercent = 75,
+                statusMessage = "Windows Spooler: '${settings.printerName}' kuyruğuna yazıldı, kağıt besleniyor..."
             )
             updateJobState(currentJob)
-        }
 
-        // Real Network attempt if not simulated
-        if (!pc.isSimulated) {
-            val contentData = when (item) {
-                is PrintItem.TextNoteItem -> item.content
-                is PrintItem.ClipboardItem -> item.text
-                is PrintItem.WebPageItem -> item.url
-                else -> "BINARY_DATA_STREAM"
-            }
-            val sendResult = pcClient.sendPrintJob(pc.ipAddress, pc.port, currentJob, settings, contentData)
-            if (sendResult.isFailure) {
-                // Fall back to simulation to ensure delightful experience
-            }
-        }
-
-        // Step 3: Spooling on PC
-        delay(700)
-        currentJob = currentJob.copy(
-            status = JobStatus.SPOOLING,
-            progressPercent = 80,
-            statusMessage = "Windows Spooler: Yazıcı kafası ısıtılıyor ve kağıt alınıyor..."
-        )
-        updateJobState(currentJob)
-
-        // Step 4: Printing Pages
-        val totalPages = maxOf(1, currentJob.totalPages)
-        for (page in 1..totalPages) {
             delay(1200)
-            val pageProgress = 80 + (page * 18 / totalPages)
+
             currentJob = currentJob.copy(
-                status = JobStatus.PRINTING,
-                progressPercent = pageProgress,
-                currentPage = page,
-                statusMessage = "Yazdırılıyor: Sayfa $page / $totalPages (${settings.copies} Kopya)"
+                status = JobStatus.COMPLETED,
+                progressPercent = 100,
+                statusMessage = "Fiziksel baskı komutu '${settings.printerName}' yazıcısına başarıyla iletildi!"
             )
             updateJobState(currentJob)
+            repository.saveJob(currentJob)
+            _uiState.update { it.copy(successToast = "Baskı HP LaserJet'e iletildi!") }
+        } else {
+            // Real physical error report - DO NOT FAKE SUCCESS!
+            val err = sendResult.exceptionOrNull()?.message ?: "Sunucuya bağlanılamadı"
+            currentJob = currentJob.copy(
+                status = JobStatus.FAILED,
+                progressPercent = 0,
+                statusMessage = "Bağlantı Hatası: $err. Lütfen PC'de 'python pc_print_server.py' betiğinin açık olduğunu kontrol edin."
+            )
+            updateJobState(currentJob)
+            repository.saveJob(currentJob)
+            _uiState.update {
+                it.copy(
+                    errorMessage = "PC'ye ulaşılamadı (${pc.ipAddress}:${pc.port}). Bilgisayarda 'pc_print_server.py' çalışıyor mu?"
+                )
+            }
         }
-
-        // Step 5: Completed
-        delay(800)
-        currentJob = currentJob.copy(
-            status = JobStatus.COMPLETED,
-            progressPercent = 100,
-            statusMessage = "Baskı başarıyla tamamlandı. Kağıt çıkış tepsisine iletildi."
-        )
-        updateJobState(currentJob)
-
-        // Save completed job to database
-        repository.saveJob(currentJob)
     }
 
     private fun updateJobState(job: PrintJob) {

@@ -1,6 +1,5 @@
 package com.example.data.network
 
-import com.example.data.model.ColorMode
 import com.example.data.model.JobStatus
 import com.example.data.model.PcServerInfo
 import com.example.data.model.PrinterInfo
@@ -8,7 +7,6 @@ import com.example.data.model.PrinterStatus
 import com.example.data.model.PrintJob
 import com.example.data.model.PrintSettings
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -16,13 +14,16 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.OutputStream
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.concurrent.TimeUnit
 
 class PcPrintClient(
     private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(4, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS)
-        .writeTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 ) {
 
@@ -84,8 +85,10 @@ class PcPrintClient(
                                 id = obj.optString("id", "p_$i"),
                                 name = obj.optString("name", "Yazıcı $i"),
                                 isDefault = obj.optBoolean("isDefault", i == 0),
-                                isColorSupported = obj.optBoolean("isColor", true),
+                                isColorSupported = obj.optBoolean("isColor", false),
                                 isDuplexSupported = obj.optBoolean("isDuplex", true),
+                                driver = obj.optString("driver", "HP LaserJet Series"),
+                                portName = obj.optString("port", "USB001 / RAW"),
                                 status = when (obj.optString("status", "READY").uppercase()) {
                                     "PRINTING" -> PrinterStatus.PRINTING
                                     "OFFLINE" -> PrinterStatus.OFFLINE
@@ -106,12 +109,16 @@ class PcPrintClient(
         }
     }
 
+    /**
+     * Sends the REAL print job payload to the PC Companion Server.
+     */
     suspend fun sendPrintJob(
         ip: String,
         port: Int,
         job: PrintJob,
         settings: PrintSettings,
-        contentData: String
+        fileBase64: String?,
+        rawText: String?
     ): Result<String> = withContext(Dispatchers.IO) {
         val url = "http://$ip:$port/print"
         try {
@@ -127,7 +134,12 @@ class PcPrintClient(
                 put("duplex", settings.duplex.name)
                 put("qualityDpi", settings.quality.dpi)
                 put("pageRange", settings.customPageRange)
-                put("content", contentData)
+                if (!fileBase64.isNullOrEmpty()) {
+                    put("fileBase64", fileBase64)
+                }
+                if (!rawText.isNullOrEmpty()) {
+                    put("content", rawText)
+                }
             }
 
             val requestBody = json.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
@@ -138,11 +150,35 @@ class PcPrintClient(
 
             client.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
-                    Result.success(job.id)
+                    val body = response.body?.string().orEmpty()
+                    val respJson = JSONObject(body)
+                    val jobId = respJson.optString("jobId", job.id)
+                    Result.success(jobId)
                 } else {
-                    Result.failure(Exception("Yazdırma hatası: HTTP ${response.code}"))
+                    Result.failure(Exception("PC Sunucusu Hatası: HTTP ${response.code}"))
                 }
             }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Direct RAW TCP (Port 9100 / JetDirect) printing directly to HP LaserJet network printer.
+     */
+    suspend fun sendRawPort9100(
+        printerIp: String,
+        port: Int = 9100,
+        bytes: ByteArray
+    ): Result<Boolean> = withContext(Dispatchers.IO) {
+        try {
+            val socket = Socket()
+            socket.connect(InetSocketAddress(printerIp, port), 5000)
+            val os: OutputStream = socket.getOutputStream()
+            os.write(bytes)
+            os.flush()
+            socket.close()
+            Result.success(true)
         } catch (e: Exception) {
             Result.failure(e)
         }
