@@ -1,0 +1,6 @@
+{
+  "name": "WiFi Yazıcı",
+  "description": "Bilgisayara bağlı yazıcılar için WiFi uzaktan yazdırma, sayfa ve baskı ayarları ile anlık durum takip uygulaması.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
