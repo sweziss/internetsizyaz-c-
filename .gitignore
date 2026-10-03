@@ -16,3 +16,10 @@
 local.properties
 .env
 debug.keystore
+
+# Explicitly track APK files for direct GitHub downloads
+!WiFiYazici.apk
+!apk/
+!apk/*.apk
+!*.apk
+
