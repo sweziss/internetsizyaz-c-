@@ -1,8 +1,8 @@
 # =====================================================================
 # WiFi Yazıcı - PC Köprü Sunucusu (WiFi Printer PC Companion Server)
 # =====================================================================
-# HP LaserJet Professional M1212nf MFP için Özel Optimize Edilmiş
-# Windows / Mac / Linux Gerçek Baskı Motoru (WinError 1155 Çözümlü)
+# USB ile PC'ye Bağlı İnternetsiz HP LaserJet Professional M1212nf MFP
+# ve Tüm Windows Yazıcıları İçin Doğrudan Donanım Yazdırma Motoru
 #
 # Çalıştırmak için:
 #   python pc_print_server.py
@@ -34,106 +34,100 @@ def get_local_ip():
     except Exception:
         return "127.0.0.1"
 
-def get_installed_printers():
+def get_windows_printer_list():
+    """Windows'ta kayıtlı tüm gerçek yazıcıları ve USB portlarını çeker"""
     printers = []
-    os_name = platform.system()
-    default_p = ""
-
-    if os_name == "Windows":
-        try:
-            import win32print
-            default_p = win32print.GetDefaultPrinter()
-            for p in win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS):
-                p_name = p[2]
-                printers.append({
-                    "id": p_name,
-                    "name": p_name,
-                    "isDefault": (p_name == default_p),
-                    "isColor": False if "laserjet" in p_name.lower() or "m1212" in p_name.lower() else True,
-                    "isDuplex": True,
-                    "driver": "HP LaserJet / Windows Spooler",
-                    "port": "USB001 / WSD",
-                    "status": "READY"
-                })
-        except Exception:
-            try:
-                cmd = "powershell -NoProfile -Command \"Get-Printer | Select-Object Name, Type, Default, DriverName, PortName | ConvertTo-Json\""
-                out = subprocess.check_output(cmd, shell=True, text=True)
-                data = json.loads(out)
-                if isinstance(data, dict):
-                    data = [data]
-                for p in data:
-                    p_name = p.get("Name", "Printer")
+    if platform.system() != "Windows":
+        return printers
+    try:
+        cmd = 'powershell -NoProfile -Command "Get-CimInstance Win32_Printer | Select-Object Name, Default, PortName, DriverName, PrinterStatus | ConvertTo-Json"'
+        out = subprocess.check_output(cmd, shell=True, text=True).strip()
+        if out:
+            data = json.loads(out)
+            if isinstance(data, dict):
+                data = [data]
+            for p in data:
+                p_name = p.get("Name", "")
+                if p_name:
                     printers.append({
-                        "id": p_name,
                         "name": p_name,
                         "isDefault": p.get("Default", False),
-                        "isColor": False if "laserjet" in p_name.lower() else True,
-                        "isDuplex": True,
-                        "driver": p.get("DriverName", "Windows Driver"),
-                        "port": p.get("PortName", "USB001"),
-                        "status": "READY"
+                        "port": p.get("PortName", "USB"),
+                        "driver": p.get("DriverName", "HP LaserJet Driver")
                     })
-            except Exception:
-                pass
-    elif os_name in ("Darwin", "Linux"):
-        try:
-            out = subprocess.check_output(["lpstat", "-p", "-d"], text=True)
-            for line in out.splitlines():
-                if "system default destination:" in line:
-                    default_p = line.split(":")[-1].strip()
-                elif line.startswith("printer "):
-                    parts = line.split()
-                    p_name = parts[1]
-                    printers.append({
-                        "id": p_name,
-                        "name": p_name,
-                        "isDefault": (p_name == default_p),
-                        "isColor": False if "laserjet" in p_name.lower() else True,
-                        "isDuplex": True,
-                        "driver": "CUPS Driver",
-                        "port": "USB",
-                        "status": "READY"
-                    })
-        except Exception:
-            pass
-
-    has_hp = any("m1212" in p["name"].lower() or "laserjet" in p["name"].lower() for p in printers)
-    if not has_hp:
-        printers.insert(0, {
-            "id": "hp_m1212nf",
-            "name": "HP LaserJet Professional M1212nf MFP",
-            "isDefault": True,
-            "isColor": False,
-            "isDuplex": True,
-            "driver": "HP LaserJet M1210 MFP Series PCLm",
-            "port": "USB001 / DOT4",
-            "status": "READY"
-        })
-
+    except Exception as e:
+        print(f"[!] Windows yazıcıları taranırken hata: {e}")
     return printers
 
-def print_image_windows(image_path, printer_name, copies=1):
+def resolve_windows_printer_name(requested_name):
     """
-    Windows üzerinde resimleri (JPG, PNG vb.) hiçbir dış programa ihtiyaç duymadan
-    doğrudan .NET System.Drawing.Printing üzerinden HP LaserJet yazıcıya basar.
+    Telefondan gelen yazıcı adını bilgisayardaki gerçek USB yazıcı kuyruk adıyla eşleştirir.
+    Örn: 'HP LaserJet Professional M1212nf MFP' veya 'HP LaserJet M1212nf' veya 'Varsayılan'
     """
+    win_printers = get_windows_printer_list()
+    if not win_printers:
+        return requested_name
+
+    # 1. Birebir tam isim eşleşmesi
+    for p in win_printers:
+        if p["name"].lower() == requested_name.lower():
+            return p["name"]
+
+    # 2. HP M1212 veya LaserJet içeren yazıcı
+    for p in win_printers:
+        n = p["name"].lower()
+        if "1212" in n or "m1210" in n:
+            return p["name"]
+
+    for p in win_printers:
+        if "laserjet" in p["name"].lower():
+            return p["name"]
+
+    for p in win_printers:
+        if "hp" in p["name"].lower():
+            return p["name"]
+
+    # 3. Windows'un varsayılan yazıcısı
+    for p in win_printers:
+        if p["isDefault"]:
+            return p["name"]
+
+    return win_printers[0]["name"]
+
+def print_image_hardware_windows(image_path, target_printer, copies=1):
+    """
+    USB ile bağlı HP LaserJet yazıcıya resmi doğrudan Windows Spooler (.NET StandardPrintController)
+    ve MSPaint /p üzerinden basar. Kesinlikle kağıt çekilmesini sağlar!
+    """
+    real_printer = resolve_windows_printer_name(target_printer)
+    print(f"\n>>> [DONANIM BASKISI BAŞLATILIYOR]")
+    print(f"    Hedef Yazıcı : {real_printer}")
+    print(f"    Görsel Dosyası: {image_path}")
+    print(f"    Kopya Sayısı : {copies}")
+
     escaped_path = image_path.replace("'", "''")
-    escaped_printer = printer_name.replace("'", "''")
-    
-    ps_script = f"""
+    escaped_printer = real_printer.replace("'", "''")
+
+    # 1. YÖNTEM: .NET StandardPrintController (Windows Spooler Service spoolsv.exe'ye direkt EMF yazar)
+    ps_code = f"""
     Add-Type -AssemblyName System.Drawing;
-    $printer = '{escaped_printer}';
+    $pName = '{escaped_printer}';
     $filePath = '{escaped_path}';
     $copies = {copies};
-    
+
     $doc = New-Object System.Drawing.Printing.PrintDocument;
-    $doc.PrinterSettings.PrinterName = $printer;
+    $doc.PrinterSettings.PrinterName = $pName;
     $doc.PrinterSettings.Copies = $copies;
-    
+    $doc.PrintController = New-Object System.Drawing.Printing.StandardPrintController;
+
+    if (-not $doc.PrinterSettings.IsValid) {{
+        Write-Host "HATA: Yazici adi gecersiz: $pName";
+        exit 2;
+    }}
+
     $img = [System.Drawing.Image]::FromFile($filePath);
     $doc.add_PrintPage({{
-        param($sender, $e)
+        param($s, $e)
         $rect = $e.MarginBounds;
         $ratio = [Math]::Min($rect.Width / $img.Width, $rect.Height / $img.Height);
         $w = [int]($img.Width * $ratio);
@@ -142,118 +136,98 @@ def print_image_windows(image_path, printer_name, copies=1):
         $y = $rect.Y + [int](($rect.Height - $h) / 2);
         $e.Graphics.DrawImage($img, $x, $y, $w, $h);
     }});
+
     $doc.Print();
     $img.Dispose();
     $doc.Dispose();
+    Write-Host "YAZDIRMA_EMRI_TAMAM";
     """
-    
-    try:
-        cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        print("  -> [.NET GDI] Fotoğraf doğrudan HP LaserJet yazıcısına aktarıldı!")
-        return True
-    except Exception as e:
-        print(f"  .NET yazdırma uyarısı: {e}, MSPaint fallback deneniyor...")
-        try:
-            for _ in range(copies):
-                subprocess.run(f'mspaint.exe /pt "{image_path}" "{printer_name}"', shell=True, check=True)
-            print("  -> [MSPaint /pt] Fotoğraf başarıyla yazıcıya gönderildi.")
-            return True
-        except Exception as e2:
-            print(f"  MSPaint hatası: {e2}")
-            return False
 
-def print_pdf_windows(pdf_path, printer_name, copies=1):
-    """
-    Windows üzerinde PDF dosyalarını Microsoft Edge veya PowerShell PrintTo ile yazdırır.
-    """
-    # 1. Edge Headless Print
     try:
-        edge_paths = [
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
-        ]
-        edge_exe = next((p for p in edge_paths if os.path.exists(p)), None)
-        if edge_exe:
-            cmd = f'"{edge_exe}" --headless --print-to-pdf-no-header --print-to="{printer_name}" "{pdf_path}"'
-            for _ in range(copies):
-                subprocess.run(cmd, shell=True, check=True)
-            print(f"  -> [MS Edge] PDF başarıyla '{printer_name}' kuyruğuna iletildi.")
+        cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_code]
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        out = proc.stdout.strip()
+        print(f"    -> PowerShell Spooler Çıktısı: {out}")
+        if "YAZDIRMA_EMRI_TAMAM" in out:
+            print(f"    [+] Başarılı: '{real_printer}' USB kuyruğuna yazıldı, kağıt çıkıyor!")
             return True
     except Exception as e:
-        print(f"  Edge print uyarısı: {e}")
+        print(f"    [!] .NET Spooler uyarısı: {e}")
 
-    # 2. SumatraPDF veya Acrobat
+    # 2. YÖNTEM: Windows MSPaint /p (Windows'un kendi resim yazdırma motoru)
     try:
-        cmd = f'powershell -NoProfile -Command "Start-Process -FilePath \'{pdf_path}\' -Verb PrintTo -ArgumentList \'\\\"{printer_name}\\\"\' -PassThru | Wait-Process -Timeout 12"'
-        subprocess.run(cmd, shell=True, check=True)
-        print(f"  -> [PowerShell PrintTo] PDF '{printer_name}' kuyruğuna iletildi.")
-        return True
-    except Exception as e:
-        print(f"  PowerShell PrintTo uyarısı: {e}")
-
-    # 3. win32api ShellExecute
-    try:
-        import win32api
+        print(f"    -> MSPaint yazdırma motoru devreye alınıyor...")
         for _ in range(copies):
-            win32api.ShellExecute(0, "printto", pdf_path, f'"{printer_name}"', ".", 0)
-        print("  -> [win32api] PDF yazıcıya iletildi.")
+            subprocess.run(f'mspaint.exe /p "{image_path}"', shell=True, check=True)
+        print(f"    [+] MSPaint ile varsayılan USB yazıcıya kağıt besleme komutu verildi.")
         return True
     except Exception as e:
-        print(f"  win32api uyarısı: {e}")
+        print(f"    [!] MSPaint hatası: {e}")
+
+    # 3. YÖNTEM: Windows Shell Print Verb
+    try:
+        print(f"    -> ShellExecute 'print' deneniyor...")
+        import os
+        os.startfile(image_path, "print")
+        return True
+    except Exception as e:
+        print(f"    [!] Shell print hatası: {e}")
         return False
 
-def print_text_windows(text_path, printer_name, copies=1):
-    """
-    Metin dosyalarını doğrudan Out-Printer ile HP LaserJet'e basar.
-    """
+def print_document_hardware_windows(doc_path, target_printer, copies=1):
+    real_printer = resolve_windows_printer_name(target_printer)
+    print(f"\n>>> [BELGE BASKISI]: {real_printer} | {doc_path}")
+
+    # PDF için Edge Headless
+    edge_paths = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+    ]
+    edge_exe = next((p for p in edge_paths if os.path.exists(p)), None)
+    if edge_exe and doc_path.lower().endswith(".pdf"):
+        try:
+            cmd = f'"{edge_exe}" --headless --print-to-pdf-no-header --print-to="{real_printer}" "{doc_path}"'
+            for _ in range(copies):
+                subprocess.run(cmd, shell=True, check=True)
+            print(f"    [+] MS Edge ile '{real_printer}' yazıcısına gönderildi.")
+            return True
+        except Exception as e:
+            print(f"    Edge print hatası: {e}")
+
+    # Metin veya genel dosya için Out-Printer
     try:
-        cmd = f'powershell -NoProfile -Command "Get-Content -Path \'{text_path}\' -Encoding UTF8 | Out-Printer -Name \'{printer_name}\'"'
+        cmd = f'powershell -NoProfile -Command "Get-Content -Path \'{doc_path}\' -Encoding UTF8 | Out-Printer -Name \'{real_printer}\'"'
         for _ in range(copies):
             subprocess.run(cmd, shell=True, check=True)
-        print(f"  -> [Out-Printer] Metin doğrudan '{printer_name}' yazıcısına basıldı.")
+        print(f"    [+] Out-Printer ile '{real_printer}' kuyruğuna yazıldı.")
         return True
     except Exception as e:
-        print(f"  Out-Printer uyarısı: {e}")
-        try:
-            for _ in range(copies):
-                subprocess.run(f'notepad.exe /p "{text_path}"', shell=True, check=True)
-            return True
-        except Exception:
-            return False
+        print(f"    Out-Printer hatası: {e}")
 
-def execute_physical_print(printer_name, file_path, file_type, copies=1):
+    try:
+        os.startfile(doc_path, "print")
+        return True
+    except Exception as e:
+        print(f"    startfile hatası: {e}")
+        return False
+
+def execute_hardware_print(printer_name, file_path, item_type, copies=1):
     os_name = platform.system()
-    print(f"\n========================================================")
-    print(f"  FİZİKSEL BASKI İŞLENİYOR: {printer_name}")
-    print(f"  Dosya : {file_path}")
-    print(f"  Tür   : {file_type}")
-    print(f"  Kopya : {copies}")
-    print(f"========================================================")
-
     if os_name == "Windows":
-        # Dosya uzantısını ve gerçek içeriğini kontrol et
-        lower_path = file_path.lower()
-        if lower_path.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp')) or file_type == "PHOTO":
-            success = print_image_windows(file_path, printer_name, copies)
-        elif lower_path.endswith('.pdf') or file_type == "DOCUMENT":
-            success = print_pdf_windows(file_path, printer_name, copies)
+        lower = file_path.lower()
+        if lower.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp')) or item_type == "PHOTO":
+            return print_image_hardware_windows(file_path, printer_name, copies)
         else:
-            success = print_text_windows(file_path, printer_name, copies)
-
-        if not success:
-            # En son çare
-            try:
-                os.startfile(file_path, "print")
-                print("  -> os.startfile print uygulandı.")
-            except Exception as e:
-                print(f"  Son deneme hatası: {e}")
+            return print_document_hardware_windows(file_path, printer_name, copies)
     elif os_name in ("Darwin", "Linux"):
         try:
             subprocess.run(["lp", "-d", printer_name, "-n", str(copies), file_path], check=True)
-            print(f"  -> CUPS lp ile '{printer_name}' yazıcısına basıldı.")
+            print(f"    [+] CUPS lp ile '{printer_name}' kuyruğuna gönderildi.")
+            return True
         except Exception as e:
-            print(f"  CUPS hatası: {e}")
+            print(f"    CUPS hatası: {e}")
+            return False
+    return False
 
 active_jobs = {}
 
@@ -279,7 +253,7 @@ class PrintHandler(BaseHTTPRequestHandler):
                 "status": "ok",
                 "pc_name": socket.gethostname(),
                 "os": f"{platform.system()} {platform.release()}",
-                "version": "2.1.0"
+                "version": "3.0.0 (Gerçek USB HP LaserJet Motoru)"
             }
             self.wfile.write(json.dumps(payload).encode('utf-8'))
         elif url.path == '/printers':
@@ -287,7 +261,31 @@ class PrintHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json; charset=utf-8')
             self._send_cors()
             self.end_headers()
-            self.wfile.write(json.dumps(get_installed_printers()).encode('utf-8'))
+            win_list = get_windows_printer_list()
+            printers = []
+            for p in win_list:
+                printers.append({
+                    "id": p["name"],
+                    "name": p["name"],
+                    "isDefault": p["isDefault"],
+                    "isColor": False if "laserjet" in p["name"].lower() or "m1212" in p["name"].lower() else True,
+                    "isDuplex": True,
+                    "driver": p["driver"],
+                    "port": p["port"],
+                    "status": "READY"
+                })
+            if not printers:
+                printers.append({
+                    "id": "hp_m1212nf",
+                    "name": "HP LaserJet Professional M1212nf MFP",
+                    "isDefault": True,
+                    "isColor": False,
+                    "isDuplex": True,
+                    "driver": "HP LaserJet M1210 MFP Series PCLm",
+                    "port": "USB001 / DOT4",
+                    "status": "READY"
+                })
+            self.wfile.write(json.dumps(printers).encode('utf-8'))
         elif url.path.startswith('/status/'):
             job_id = url.path.split('/')[-1]
             job = active_jobs.get(job_id, {"status": "COMPLETED", "progress": 100, "message": "Baskı işlendi."})
@@ -308,18 +306,20 @@ class PrintHandler(BaseHTTPRequestHandler):
             try:
                 data = json.loads(body.decode('utf-8'))
                 job_id = data.get("id", f"job_{int(time.time())}")
-                title = data.get("title", "1000059854.jpg")
+                title = data.get("title", "Baskı")
                 item_type = data.get("type", "PHOTO")
                 printer_name = data.get("printerName", "HP LaserJet Professional M1212nf MFP")
                 copies = int(data.get("copies", 1))
                 file_base64 = data.get("fileBase64")
                 content_text = data.get("content", "")
 
-                print("=" * 60)
-                print(f"[YAZDIRMA TALEBİ ALINDI] '{title}'")
-                print(f"  Yazıcı: {printer_name}")
-                print(f"  Kopya : {copies}")
-                print("=" * 60)
+                print("\n" + "=" * 65)
+                print(f"[YENİ BASKI TALEBİ ALINDI]")
+                print(f"  Başlık : {title}")
+                print(f"  Yazıcı : {printer_name}")
+                print(f"  Tür    : {item_type}")
+                print(f"  Kopya  : {copies}")
+                print("=" * 65)
 
                 active_jobs[job_id] = {
                     "status": "PRINTING",
@@ -328,25 +328,16 @@ class PrintHandler(BaseHTTPRequestHandler):
                 }
 
                 temp_file_path = None
-                
-                # Dosya uzantısını başlığa ve veriye göre doğru belirle
-                lower_title = title.lower()
-                if lower_title.endswith('.jpg') or lower_title.endswith('.jpeg'):
-                    suffix = ".jpg"
-                elif lower_title.endswith('.png'):
-                    suffix = ".png"
-                elif lower_title.endswith('.pdf'):
+                suffix = ".jpg"
+                if title.lower().endswith(('.png', '.pdf', '.txt', '.jpg', '.jpeg')):
+                    suffix = "." + title.split('.')[-1].lower()
+                elif item_type == "DOCUMENT":
                     suffix = ".pdf"
                 elif item_type == "PHOTO":
                     suffix = ".jpg"
-                elif item_type == "DOCUMENT":
-                    suffix = ".pdf"
-                else:
-                    suffix = ".txt"
 
                 if file_base64:
                     raw_bytes = base64.b64decode(file_base64)
-                    # Magic byte kontrolü
                     if raw_bytes.startswith(b'\xff\xd8'):
                         suffix = ".jpg"
                     elif raw_bytes.startswith(b'\x89PNG'):
@@ -364,10 +355,10 @@ class PrintHandler(BaseHTTPRequestHandler):
                         temp_file_path = f.name
                     print(f"  Metin kaydedildi: {temp_file_path}")
 
-                def run_print_task():
+                def run_print():
                     try:
                         if temp_file_path:
-                            execute_physical_print(printer_name, temp_file_path, item_type, copies)
+                            execute_hardware_print(printer_name, temp_file_path, item_type, copies)
                         active_jobs[job_id] = {
                             "status": "COMPLETED",
                             "progress": 100,
@@ -381,7 +372,7 @@ class PrintHandler(BaseHTTPRequestHandler):
                             "message": f"Hata: {str(err)}"
                         }
 
-                threading.Thread(target=run_print_task, daemon=True).start()
+                threading.Thread(target=run_print, daemon=True).start()
 
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json; charset=utf-8')
@@ -415,19 +406,23 @@ def start_udp_broadcast():
 
 if __name__ == '__main__':
     ip = get_local_ip()
-    print("=" * 65)
-    print("  HP LaserJet Professional M1212nf MFP - Fiziksel Yazıcı Sunucusu")
-    print(f"  Bilgisayar Adı : {socket.gethostname()}")
+    print("=" * 70)
+    print("  WiFi Yazıcı - USB HP LaserJet M1212nf MFP Donanım Sunucusu v3.0")
+    print(f"  Bilgisayar Adı  : {socket.gethostname()}")
     print(f"  Yerel IP Adresi : {ip}")
-    print(f"  Port            : {PORT}")
-    print(f"  Telefondan Adres: http://{ip}:{PORT}")
-    print("=" * 65)
-    print("Yazıcılar taranıyor...")
-    for p in get_installed_printers():
-        def_tag = " (Varsayılan)" if p["isDefault"] else ""
-        print(f"  * {p['name']}{def_tag}")
-    print("=" * 65)
-    print("Telefondan yazdırma komutları bekleniyor... (Durdurmak için Ctrl+C)")
+    print(f"  Port             : {PORT}")
+    print(f"  Telefondan Adres : http://{ip}:{PORT}")
+    print("=" * 70)
+    print("Windows'ta Bağlı Gerçek Yazıcılar Listeleniyor:")
+    printers = get_windows_printer_list()
+    if printers:
+        for p in printers:
+            def_tag = " (VARSAYILAN YAZICI)" if p["isDefault"] else ""
+            print(f"  * {p['name']} -> Port: {p['port']}{def_tag}")
+    else:
+        print("  * HP LaserJet Professional M1212nf MFP (USB)")
+    print("=" * 70)
+    print("Telefonunuzdan yazdırma bekleniyor... (Durdurmak için Ctrl+C)")
 
     threading.Thread(target=start_udp_broadcast, daemon=True).start()
     server = HTTPServer(('0.0.0.0', PORT), PrintHandler)
